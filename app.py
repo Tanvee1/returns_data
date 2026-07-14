@@ -2,73 +2,255 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import seaborn as sns
-import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+import plotly.express as px
 from scipy.stats import norm
 
-st.set_page_config(page_title="📊 NSE Returns Analyzer", layout="wide")
+st.set_page_config(
+    page_title="NSE Returns Analyzer",
+    page_icon="📈",
+    layout="wide"
+)
 
-st.title("📈 NSE Returns Distribution Analyzer")
-st.markdown("Analyze Daily, Weekly, and Monthly Returns for any NSE stock or index.")
+st.title("📈 NSE Returns Analyzer")
+st.markdown("Analyze stock returns, risk metrics, and distributions.")
 
-# --- Sidebar Inputs ---
-ticker = st.sidebar.text_input("Enter NSE Ticker Symbol (e.g., RELIANCE.NS, ^NSEI)", value="RELIANCE.NS")
-period = st.sidebar.selectbox("Select Time Period", options=["6mo", "1y", "3y", "5y"], index=2)
+# Sidebar
+ticker = st.sidebar.text_input(
+    "Ticker Symbol",
+    value="RELIANCE.NS"
+)
 
-# --- Fetch Data ---
-@st.cache_data(show_spinner=True)
-def get_data(ticker, period):
-    data = yf.download(ticker, period=period)
+period = st.sidebar.selectbox(
+    "Time Period",
+    ["6mo", "1y", "3y", "5y", "10y"],
+    index=2
+)
+
+risk_free_rate = st.sidebar.number_input(
+    "Risk Free Rate (%)",
+    value=7.0,
+    step=0.5
+)
+
+# Fetch Data
+@st.cache_data
+def load_data(ticker, period):
+    data = yf.download(
+        ticker,
+        period=period,
+        auto_adjust=True,
+        progress=False
+    )
     return data
 
-data = get_data(ticker, period)
+data = load_data(ticker, period)
 
 if data.empty:
-    st.error("❌ Failed to fetch data. Please check the ticker symbol or internet connection.")
+    st.error("Unable to fetch data for this ticker.")
     st.stop()
 
-st.success(f"✅ Data fetched: {len(data)} records from Yahoo Finance")
+data.index = pd.to_datetime(data.index)
 
-# --- Calculate Returns ---
-data['Daily_Return'] = data['Close'].pct_change().dropna()
-daily_returns = data['Daily_Return'].dropna()
+# Handle MultiIndex columns from yfinance
+if isinstance(data.columns, pd.MultiIndex):
+    close = data["Close"].iloc[:, 0]
+    open_price = data["Open"].iloc[:, 0]
+    high = data["High"].iloc[:, 0]
+    low = data["Low"].iloc[:, 0]
+else:
+    close = data["Close"]
+    open_price = data["Open"]
+    high = data["High"]
+    low = data["Low"]
 
-weekly_returns = data['Close'].resample('W').ffill().pct_change().dropna()
-monthly_returns = data['Close'].resample('M').ffill().pct_change().dropna()
+# Returns
+daily_returns = close.pct_change().dropna()
 
-# --- Bell Curve Plot Function ---
-def plot_bell_curve(returns, label, color, kde_color):
-    if isinstance(returns, pd.DataFrame):
-        returns = returns.squeeze()
-    mu, std = returns.mean(), returns.std()
-    x = np.linspace(returns.min(), returns.max(), 100)
-    p = norm.pdf(x, mu, std)
+weekly_returns = (
+    close.resample("W").last()
+    .pct_change()
+    .dropna()
+)
 
-    fig, ax = plt.subplots(figsize=(8, 5))
-    sns.histplot(returns, bins=50, kde=True, stat="density", color=color, edgecolor='black')
-    ax.plot(x, p, color=kde_color, linewidth=2, label=f"Normal PDF\nμ={mu:.4f}, σ={std:.4f}")
-    ax.set_title(f"{label} Returns Distribution")
-    ax.set_xlabel("Returns")
-    ax.set_ylabel("Density")
-    ax.legend()
-    ax.grid(True, linestyle='--', alpha=0.6)
-    st.pyplot(fig)
+monthly_returns = (
+    close.resample("ME").last()
+    .pct_change()
+    .dropna()
+)
 
-# --- Show Summary + Plots ---
-st.header(f"📊 Summary Statistics: {ticker} ({period})")
-col1, col2, col3 = st.columns(3)
+# Metrics
+annual_return = daily_returns.mean() * 252
+annual_volatility = daily_returns.std() * np.sqrt(252)
 
-with col1:
-    st.subheader("📅 Daily Returns")
-    st.write(daily_returns.describe())
-    plot_bell_curve(daily_returns, "Daily", "skyblue", "red")
+sharpe_ratio = (
+    annual_return - risk_free_rate / 100
+) / annual_volatility
 
-with col2:
-    st.subheader("📆 Weekly Returns")
-    st.write(weekly_returns.describe())
-    plot_bell_curve(weekly_returns.squeeze(), "Weekly", "lightgreen", "darkgreen")
+var_95 = np.percentile(daily_returns, 5)
 
-with col3:
-    st.subheader("📆 Monthly Returns")
-    st.write(monthly_returns.describe())
-    plot_bell_curve(monthly_returns.squeeze(), "Monthly", "salmon", "darkred")
+cumulative_returns = (
+    1 + daily_returns
+).cumprod()
+
+rolling_max = cumulative_returns.cummax()
+drawdown = (
+    cumulative_returns - rolling_max
+) / rolling_max
+
+max_drawdown = drawdown.min()
+
+# Metrics Row
+col1, col2, col3, col4, col5 = st.columns(5)
+
+col1.metric(
+    "Annual Return",
+    f"{annual_return*100:.2f}%"
+)
+
+col2.metric(
+    "Volatility",
+    f"{annual_volatility*100:.2f}%"
+)
+
+col3.metric(
+    "Sharpe Ratio",
+    f"{sharpe_ratio:.2f}"
+)
+
+col4.metric(
+    "95% VaR",
+    f"{var_95*100:.2f}%"
+)
+
+col5.metric(
+    "Max Drawdown",
+    f"{max_drawdown*100:.2f}%"
+)
+
+# Price Chart
+st.subheader("Price Chart")
+
+fig_price = go.Figure()
+
+fig_price.add_trace(
+    go.Scatter(
+        x=close.index,
+        y=close.values,
+        mode="lines",
+        name="Close Price"
+    )
+)
+
+fig_price.update_layout(
+    height=500,
+    xaxis_title="Date",
+    yaxis_title="Price"
+)
+
+st.plotly_chart(
+    fig_price,
+    use_container_width=True
+)
+
+# Candlestick
+st.subheader("Candlestick Chart")
+
+fig_candle = go.Figure(
+    data=[
+        go.Candlestick(
+            x=data.index,
+            open=open_price,
+            high=high,
+            low=low,
+            close=close
+        )
+    ]
+)
+
+fig_candle.update_layout(
+    height=600
+)
+
+st.plotly_chart(
+    fig_candle,
+    use_container_width=True
+)
+
+# Tabs
+tab1, tab2, tab3 = st.tabs(
+    ["Daily", "Weekly", "Monthly"]
+)
+
+def show_distribution(returns, title):
+    mean = returns.mean()
+    std = returns.std()
+
+    fig = px.histogram(
+        returns,
+        nbins=50,
+        title=title
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
+
+    st.write(returns.describe())
+
+with tab1:
+    show_distribution(
+        daily_returns,
+        "Daily Returns Distribution"
+    )
+
+with tab2:
+    show_distribution(
+        weekly_returns,
+        "Weekly Returns Distribution"
+    )
+
+with tab3:
+    show_distribution(
+        monthly_returns,
+        "Monthly Returns Distribution"
+    )
+
+# Cumulative Returns
+st.subheader("Cumulative Returns")
+
+fig_cum = go.Figure()
+
+fig_cum.add_trace(
+    go.Scatter(
+        x=cumulative_returns.index,
+        y=(cumulative_returns - 1) * 100,
+        mode="lines",
+        name="Cumulative Return"
+    )
+)
+
+fig_cum.update_layout(
+    height=500,
+    yaxis_title="Return (%)"
+)
+
+st.plotly_chart(
+    fig_cum,
+    use_container_width=True
+)
+
+# Download CSV
+returns_df = pd.DataFrame({
+    "Daily Returns": daily_returns
+})
+
+csv = returns_df.to_csv().encode("utf-8")
+
+st.download_button(
+    label="📥 Download Daily Returns CSV",
+    data=csv,
+    file_name=f"{ticker}_returns.csv",
+    mime="text/csv"
+)
